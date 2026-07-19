@@ -21,12 +21,46 @@ Run in this order:
 
 1. **[match_companies.py](match_companies.py)** — Matches the 358 target IPO companies against the 10,000-company financial dataset (exact match, then fuzzy matching via `rapidfuzz`). Produces `company_matching_review.xlsx` for manual confirmation of fuzzy matches. **Result: 302 matched / 56 unmatched.**
 2. **[merge_ipo_data.py](merge_ipo_data.py)** — Cross-joins all 358 IPO companies × 5 years, left-merges in financial columns keyed on `(Matched Financial Company, Year)`, preserving all 358 original rows (unmatched companies are NaN'd, not dropped). Produces `ipo_merged_dataset.xlsx` (1790 rows × 56 cols, long format).
-3. **[preprocess.py](preprocess.py)** — Data-quality fixes (nullifies 5 confirmed-bad company-years, fixes one negative `Days_to_List`), derives per-company CAGR/margin/ROE/ROCE features across FY2022–26, winsorizes and scales. Produces `ipo_preprocessed.xlsx`, `ipo_features_scaled.csv`, `ipo_targets.csv`. Note: uses 2022–2026 averages, which pre-date real listing dates (superseded for driver analysis by step 5).
+3. **[preprocess.py](preprocess.py)** — Feature engineering pipeline turning the 302 matched companies into a clustering/model-ready matrix. Produces `ipo_preprocessed.xlsx`, `ipo_features_scaled.csv`, `ipo_targets.csv`. Note: uses 2022–2026 averages, which pre-date real listing dates (superseded for driver analysis by step 5). Full detail in [Preprocessing pipeline](#preprocessing-pipeline-preprocesspy).
 4. **[clustering.py](clustering.py)** — K-Means/Agglomerative clustering on the averaged features from step 3. Produces `ipo_clustered.xlsx`, `cluster_profiles.xlsx`, `cluster_performance.xlsx`, plus diagnostic charts.
 5. **[preipo_driver_analysis.py](preipo_driver_analysis.py)** — Builds a true pre-IPO snapshot (last FY *before* listing, using sourced NSE listing dates) and runs the supervised driver analysis: Spearman correlation + Random Forest / permutation importance against listing returns. Produces `ipo_preipo_features.xlsx`, `preipo_feature_correlation.xlsx`, `preipo_feature_importance.xlsx`.
 6. **[reclustering_preipo.py](reclustering_preipo.py)** — Re-runs clustering on the corrected pre-IPO snapshot from step 5 (fixes the look-ahead bias in step 4). Produces `ipo_reclustered_preipo.xlsx`, `recluster_profiles.xlsx`, `recluster_performance.xlsx`.
 
 Reference/planning docs: [CLUSTERING_PLAN.md](CLUSTERING_PLAN.md), [ML_RESEARCH_ROADMAP.md](ML_RESEARCH_ROADMAP.md).
+
+### Preprocessing pipeline (`preprocess.py`)
+
+Input: 302 matched companies × 5 years (1510 rows, long format). Output: one row per company, model-ready.
+
+**1. Data-quality fixes applied before any feature derivation:**
+- Nullified 5 confirmed-bad company-years (see [Data-quality fixes](#supporting-detail) below) across 9 financial columns: `Total Operating Revenue`, `Operating Profit`, `Profit before Income Tax`, `Net Profit/Loss for the Period`, `ROE (%)`, `ROCE (%)`, `Debt/Equity (%)`, `Interest Coverage Ratio (x)`, `Assets Turnover (x)`.
+- Fixed one corrupted value: Ruchi Soya `Days_to_List` was -7025 → set to NaN (later median-imputed).
+- Manually reassigned Sri Lotus Developers to "Infrastructure, Construction & Utilities" (no "Real Estate" category exists in the 7-industry scheme used for one-hot encoding).
+
+**2. Per-company feature derivation** across the 5-year window (2022–2026): `Revenue_CAGR`, `PAT_CAGR`, `Avg_Operating_Margin`, `Avg_ROE_pct`, `Avg_ROCE_pct`, `Avg_DE_pct`, `Avg_Interest_Coverage`, `Avg_Assets_Turnover`, plus latest-year revenue/profit/ROE/D-E.
+- `PAT_CAGR` uses a fallback formula, `(Latest − Earliest) / |Earliest|`, whenever the base year is non-positive, since geometric CAGR is undefined/complex in that case.
+- `Company_Age` derived from incorporation year using 2024 as a single proxy IPO year (this predates real listing-date sourcing — see step 5 in the pipeline for the corrected, per-company version used in the driver analysis).
+
+**3. Collapse** long format (1510 rows) → 1 row per company (302 rows); fill IPO-collection placeholder columns (Revenue, net income, ROE, D/E, growth rates, Company Age) from the derived values.
+
+**4. Outlier handling / transforms:**
+- Winsorized heavy-tailed columns at the 5th–95th percentile: `Avg_ROE_pct`, `Avg_ROCE_pct`, `Avg_DE_pct`, `Avg_Interest_Coverage`, `Revenue_CAGR`, `PAT_CAGR`, all return columns.
+- Log-transformed `ISSUE PRICE` and `Latest_Revenue` to reduce right-skew.
+
+**5. Missing data:** median-imputed remaining gaps (`Range_Width_pct`, `Days_to_List`, `Company_Age`, a handful of ratio columns).
+
+**6. Encoding:** one-hot encoded `Assigned Industry` (7 sectors → 6 dummy columns, drop-first to avoid collinearity).
+
+**7. Target/feature split:** separated X (features) from Y (return targets `Return_1d…60d` + `PostIPO_price_std`). `PostIPO_price_std` is treated as validation-only, never a clustering/model input, since it's a post-listing outcome unknown at IPO time.
+
+**8. Scaling:** `RobustScaler` applied to X — chosen over `StandardScaler` because the winsorized features still carry residual skew that would distort a mean/variance-based scaler.
+
+**Outputs:**
+- `ipo_preprocessed.xlsx` — 302 rows × 43 cols, human-readable with all derived/filled columns.
+- `ipo_features_scaled.csv` — 302 × 21 scaled features (`Company_Age`, `Log_Issue_Price`, `Range_Width_pct`, `Days_to_List`, `Revenue_CAGR`, `PAT_CAGR`, `Avg_Operating_Margin`, `Avg_ROE_pct`, `Avg_ROCE_pct`, `Avg_DE_pct`, `Avg_Interest_Coverage`, `Avg_Assets_Turnover`, `Log_Latest_Revenue` + 6 industry dummies).
+- `ipo_targets.csv` — 302 × 10 (`Return_1d…60d`, `PostIPO_price_std`).
+
+**Validation:** spot-checked FiveStar's post-fix figures against verified RHP data (Revenue_CAGR=0.216, PAT_CAGR=0.1465 — matched). 297/302 companies have return data (5 very recent listings lack post-listing returns yet).
 
 ## Key findings
 
